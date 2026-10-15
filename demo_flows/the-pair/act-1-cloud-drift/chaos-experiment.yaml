@@ -1,0 +1,44 @@
+# Scenario: The Pair — Act 1: Cloud Drift
+# CoreDNS Resource Starvation via CPU/Memory Stress
+#
+# Injects CPU and memory stress on CoreDNS pods, simulating resource
+# starvation that degrades internal DNS resolution for service discovery.
+# Combined with NSG deny rule on the AKS node RG (via trigger.sh az CLI),
+# this creates a two-layer outage: external traffic blocked (Azure layer) +
+# internal service discovery breaks (Kubernetes layer).
+#
+# Prerequisites:
+#   - Chaos Mesh must be installed and operational
+#   - CoreDNS pods must exist in kube-system namespace
+#   - Verify: kubectl get pods -n kube-system -l k8s-app=kube-dns
+#
+# Apply:  kubectl apply -f chaos-experiment.yaml
+# Remove: kubectl delete -f chaos-experiment.yaml
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: act1-coredns-starvation
+  namespace: relibank
+  labels:
+    app: relibank
+    experiment-type: stress-chaos
+    target-flow: act1-cloud-drift
+    scenario: the-pair
+    act: "1"
+spec:
+  mode: all
+  selector:
+    namespaces:
+      - kube-system
+    labelSelectors:
+      k8s-app: kube-dns
+  containerNames:
+    - coredns
+  stressors:
+    cpu:
+      workers: 2
+      load: 80
+    memory:
+      workers: 1
+      size: "256MB"
+  duration: "10m"

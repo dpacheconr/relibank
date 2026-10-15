@@ -1,0 +1,29 @@
+# Database Performance Matrix, Act 1: Resource Starvation: Alternative / More Dramatic Trigger
+# Kills the Kafka pod entirely. Consumers immediately lose the broker;
+# bill-pay connection pool exhausts faster (~30s) and the cascade is
+# more abrupt — useful when you want a sharper "oh no" moment on screen.
+# The pod restarts automatically (Deployment replicas: 1), so recovery
+# is visible in real time once the chaos is deleted.
+#
+# Apply:  kubectl apply -f chaos-experiment-pod-kill.yaml
+# Remove: kubectl delete -f chaos-experiment-pod-kill.yaml
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: database-performance-matrix-act1-kafka-pod-kill
+  namespace: relibank
+  labels:
+    app: relibank
+    experiment-type: pod-chaos
+    target-flow: database-performance-matrix-act1-kafka-pod-kill
+    scenario: database-performance-matrix-act1
+spec:
+  action: pod-kill
+  mode: one
+  selector:
+    namespaces:
+      - relibank
+    labelSelectors:
+      app: kafka
+  duration: 10m
+  gracePeriod: 0

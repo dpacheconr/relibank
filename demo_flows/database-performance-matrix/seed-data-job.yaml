@@ -1,0 +1,120 @@
+# Database Performance Matrix: idempotent seed for Merchants (50K) and BankTransactions (2M).
+#
+# Acts 3 (competing query) and 4 (plan regression) need these tables populated to produce their
+# effect; on a cluster built from k8s/overlays/auto-attach/init.sql they exist but are empty. Each
+# Act's `enable` verb runs this Job first (see lib-seed.sh). It is safe to run repeatedly: tables
+# that already have rows are left alone, so the second run only does two COUNTs.
+#
+# It also renames BankTransactions.Location -> Channel when the table was created from the older
+# auto-attach schema, since the Act 4 driver query selects Channel.
+#
+# Applied via lib-seed.sh: envsubst '${MSSQL_CUSTOM_IMAGE}' < seed-data-job.yaml | kubectl apply -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: database-performance-matrix-seed
+  namespace: relibank
+  labels:
+    app: relibank
+    experiment-type: seed
+    scenario: database-performance-matrix
+spec:
+  ttlSecondsAfterFinished: 120
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: relibank
+        experiment-type: seed
+        scenario: database-performance-matrix
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: seed
+        image: ${MSSQL_CUSTOM_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -euo pipefail
+            sql() { /opt/mssql-tools18/bin/sqlcmd -S mssql-0 -U "$MSSQL_SA_USER" -P "$MSSQL_SA_PASSWORD" -C -d RelibankDB -b -Q "$1"; }
+
+            # Separate batch: the seed below references Channel, which must exist at compile time.
+            sql "IF COL_LENGTH('dbo.BankTransactions','Channel') IS NULL AND COL_LENGTH('dbo.BankTransactions','Location') IS NOT NULL EXEC sp_rename 'dbo.BankTransactions.Location','Channel','COLUMN';"
+
+            sql "
+            IF (SELECT COUNT_BIG(*) FROM dbo.Merchants) = 0
+            BEGIN
+                ;WITH Numbers AS (
+                    SELECT TOP 50000 ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n
+                    FROM sys.all_columns a CROSS JOIN sys.all_columns b
+                )
+                INSERT INTO dbo.Merchants (MerchantID, MerchantName, Category, Region, RiskTier, AnnualVolume, IsActive)
+                SELECT n, 'Merchant ' + CAST(n AS VARCHAR(10)),
+                    CASE (n % 8) WHEN 0 THEN 'Retail' WHEN 1 THEN 'Restaurant' WHEN 2 THEN 'Travel'
+                        WHEN 3 THEN 'Healthcare' WHEN 4 THEN 'Gas & Auto' WHEN 5 THEN 'Online'
+                        WHEN 6 THEN 'Grocery' ELSE 'Entertainment' END,
+                    CASE (n % 6) WHEN 0 THEN 'Northeast' WHEN 1 THEN 'Southeast' WHEN 2 THEN 'Midwest'
+                        WHEN 3 THEN 'Southwest' WHEN 4 THEN 'West' ELSE 'Central' END,
+                    CASE WHEN n % 20 = 0 THEN 3 WHEN n % 7 = 0 THEN 2 ELSE 1 END,
+                    ((n % 9000) + 1000) * 100.00,
+                    CASE WHEN n % 15 = 0 THEN 0 ELSE 1 END
+                FROM Numbers;
+                PRINT 'Merchants seeded: 50000 rows';
+            END
+            ELSE PRINT 'Merchants already seeded';
+            "
+
+            sql "
+            IF (SELECT COUNT_BIG(*) FROM dbo.BankTransactions) = 0
+            BEGIN
+                ;WITH Numbers AS (
+                    SELECT TOP 1000000 ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n
+                    FROM sys.all_columns a CROSS JOIN sys.all_columns b CROSS JOIN sys.all_columns c
+                )
+                INSERT INTO dbo.BankTransactions (TxnID, AccountID, MerchantID, Amount, TxnDate, TxnType, Status, Channel)
+                SELECT n, (n % 10000) + 10001, (n % 50000) + 1,
+                    CAST(((n % 49900) + 100) AS DECIMAL(10,2)) / 100.0,
+                    DATEADD(SECOND, -(n * 31), GETDATE()),
+                    CASE (n % 4) WHEN 0 THEN 'Purchase' WHEN 1 THEN 'Refund' WHEN 2 THEN 'Transfer' ELSE 'ATM' END,
+                    CASE WHEN n % 50 = 0 THEN 'Flagged' WHEN n % 15 = 0 THEN 'Declined' ELSE 'Approved' END,
+                    CASE (n % 4) WHEN 0 THEN 'Online' WHEN 1 THEN 'InStore' WHEN 2 THEN 'Mobile' ELSE 'ATM' END
+                FROM Numbers;
+
+                ;WITH Numbers AS (
+                    SELECT TOP 1000000 ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) + 1000000 AS n
+                    FROM sys.all_columns a CROSS JOIN sys.all_columns b CROSS JOIN sys.all_columns c
+                )
+                INSERT INTO dbo.BankTransactions (TxnID, AccountID, MerchantID, Amount, TxnDate, TxnType, Status, Channel)
+                SELECT n, (n % 10000) + 10001, (n % 50000) + 1,
+                    CAST(((n % 49900) + 100) AS DECIMAL(10,2)) / 100.0,
+                    DATEADD(SECOND, -(n * 31), GETDATE()),
+                    CASE (n % 4) WHEN 0 THEN 'Purchase' WHEN 1 THEN 'Refund' WHEN 2 THEN 'Transfer' ELSE 'ATM' END,
+                    CASE WHEN n % 50 = 0 THEN 'Flagged' WHEN n % 15 = 0 THEN 'Declined' ELSE 'Approved' END,
+                    CASE (n % 4) WHEN 0 THEN 'Online' WHEN 1 THEN 'InStore' WHEN 2 THEN 'Mobile' ELSE 'ATM' END
+                FROM Numbers;
+                PRINT 'BankTransactions seeded: 2000000 rows';
+                UPDATE STATISTICS dbo.Merchants WITH FULLSCAN;
+                UPDATE STATISTICS dbo.BankTransactions WITH FULLSCAN;
+            END
+            ELSE PRINT 'BankTransactions already seeded';
+            "
+            echo "seed complete"
+        env:
+        - name: MSSQL_SA_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: MSSQL_SA_PASSWORD
+        - name: MSSQL_SA_USER
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: MSSQL_SA_USER
+        resources:
+          requests:
+            cpu: "10m"
+            memory: "32Mi"
+          limits:
+            cpu: "100m"
+            memory: "128Mi"

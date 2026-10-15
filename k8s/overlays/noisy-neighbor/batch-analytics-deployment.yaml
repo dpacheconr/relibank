@@ -1,0 +1,65 @@
+# Noisy Neighbor offender: a single-replica Deployment using pod affinity to
+# colocate with bill-pay-service (which also affinity-pins transaction-service).
+# CPU request 900m gives ~18x weight vs victims' 50m requests (CFS proportion),
+# starving them under its SPINNERS-spinner load. No CPU limit; neighbor request may be
+# reduced at runtime to min(900m, node free CPU after squeeze). Guardrail: burn
+# is time-boxed (timeout 1800s) so it idles after 30 min; deleted on
+# `trigger.sh neighbor-stop`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: batch-analytics
+  namespace: relibank
+  labels:
+    app: batch-analytics
+    scenario: noisy-neighbor
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # request is resized at runtime; surge pod would not fit beside the old one
+  selector:
+    matchLabels:
+      app: batch-analytics
+  template:
+    metadata:
+      labels:
+        app: batch-analytics
+        scenario: noisy-neighbor
+    spec:
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - bill-pay-service
+              topologyKey: kubernetes.io/hostname
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      tolerations:
+        - key: node.kubernetes.io/arch
+          operator: Equal
+          value: amd64
+          effect: NoSchedule
+      containers:
+        - name: analytics-worker
+          image: docker.io/library/busybox:1.36
+          env:
+            - name: SPINNERS
+              value: "4"
+          command:
+            - sh
+            - -c
+            - |
+              spinners=${SPINNERS:-4}
+              list=$(seq 1 $spinners | tr '\n' ' ')
+              timeout 1800 sh -c "for i in $list; do (while :; do :; done) & done; wait"
+              sleep 86400
+          # Misconfiguration: 1-core request but NO limit. Services only get CPU in
+          # proportion to their (small) requests, so 8 spinners starve them under load.
+          # (With no request at all the pod is BestEffort, cfs weight ~2, and APM never notices.)
+          resources:
+            requests:
+              cpu: "900m"

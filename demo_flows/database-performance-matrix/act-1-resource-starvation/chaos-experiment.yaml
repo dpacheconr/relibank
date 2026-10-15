@@ -1,0 +1,79 @@
+# Database Performance Matrix, Act 1: Resource Starvation
+#
+# Two-phase injection:
+#   1. StressChaos — maxes out MSSQL container CPU (4 workers @ 95%)
+#      and holds 400MB memory, starving the sqlservr process.
+#   2. NetworkChaos — adds 3s latency on MSSQL outbound responses,
+#      simulating the network-buffer backup that occurs when the kernel
+#      can't schedule the DB process to drain its send queues.
+#
+# Together these cause:
+#   K8s 360  — MSSQL CPU pegged at the 2-core limit within ~30s,
+#              containerCpuCfsThrottledSecondsDelta climbing (10-16s throttled
+#              per 30s window); memory ticks up slightly but nowhere near the
+#              8Gi container limit — CPU is the reliable signal, not memory
+#   DB 360   — sqlserver wait stats (ASYNC_NETWORK_IO) spiking with a longer
+#              observation window; SOS_SCHEDULER_YIELD stayed negligible,
+#              ASYNC_NETWORK_IO is the real dominant wait type
+#   APM      — bill-pay error rate spikes to ~85-90% almost immediately (not a
+#              slow ramp); avg duration actually drops slightly (fails fast
+#              rather than hanging). Error: bill-pay logs "Unexpected status
+#              500 from transaction service during cancel/duplicate check",
+#              surfaced as its own APM error "502: Transaction service
+#              returned an unexpected error."
+#
+# Apply:  kubectl apply -f chaos-experiment.yaml
+# Remove: kubectl delete -f chaos-experiment.yaml
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: database-performance-matrix-act1-mssql-stress
+  namespace: relibank
+  labels:
+    app: relibank
+    experiment-type: stress-chaos
+    target-flow: database-performance-matrix-act1-mssql-stress
+    scenario: database-performance-matrix-act1
+spec:
+  mode: one
+  selector:
+    namespaces:
+      - relibank
+    labelSelectors:
+      app: mssql
+  containerNames:
+    - mssql
+  stressors:
+    memory:
+      workers: 4
+      size: "400MB"
+    cpu:
+      workers: 4
+      load: 95
+  duration: "1h"
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: database-performance-matrix-act1-mssql-network-delay
+  namespace: relibank
+  labels:
+    app: relibank
+    experiment-type: network-chaos
+    target-flow: database-performance-matrix-act1-mssql-stress
+    scenario: database-performance-matrix-act1
+spec:
+  action: delay
+  mode: one
+  selector:
+    namespaces:
+      - relibank
+    labelSelectors:
+      app: mssql
+  delay:
+    latency: "3000ms"
+    jitter: "500ms"
+    correlation: "100"
+  direction: to
+  duration: "1h"

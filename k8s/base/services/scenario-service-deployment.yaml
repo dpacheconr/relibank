@@ -16,8 +16,15 @@ spec:
       labels:
         app: scenario-runner
     spec:
+      serviceAccountName: scenario-runner
       containers:
         - env:
+            - name: CLOUD_PROVIDER
+              value: "azure"
+            - name: SCENARIO_RUNNER_URL
+              value: "http://localhost:8000"
+            - name: BASE_URL
+              value: "http://frontend-service:3000"
             - name: KAFKA_BROKER
               valueFrom:
                 configMapKeyRef:

@@ -1,0 +1,36 @@
+# Scenario: The Pair — Act 2: DNS Black Hole (eBPF) Chaos Trigger
+# Injects DNS SERVFAIL responses for the accounts-service hostname as seen
+# from transaction-service pods in the relibank namespace.
+# transaction-service cannot resolve accounts-service, causing payment
+# validation requests to fail with "connection refused" errors within ~30s.
+#
+# Prerequisites:
+#   chaos-dns-server must be enabled in the Chaos Mesh installation.
+#   Verify: kubectl get pods -n chaos-mesh -l app.kubernetes.io/component=chaos-dns-server
+#
+# Apply:  kubectl apply -f chaos-experiment.yaml
+# Remove: kubectl delete -f chaos-experiment.yaml
+apiVersion: chaos-mesh.org/v1alpha1
+kind: DNSChaos
+metadata:
+  name: the-pair-act2-dns-servfail
+  namespace: relibank
+  labels:
+    app: relibank
+    experiment-type: dns-chaos
+    target-flow: act2-dns-black-hole
+    scenario: the-pair
+    act: "2"
+spec:
+  action: error
+  mode: all
+  selector:
+    namespaces:
+      - relibank
+    labelSelectors:
+      app: transaction-service
+  patterns:
+    - "accounts-service.relibank.svc.cluster.local."
+    - "accounts-service.relibank."
+    - "accounts-service."
+  duration: "8m"

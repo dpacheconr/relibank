@@ -1,0 +1,89 @@
+# Database Performance Matrix, Act 3: Competing Query: Analytics Scan Injection
+# Runs a repeated, unindexed aggregation scan over BankTransactions (2M rows)
+# joined to Merchants (50k rows) for ~5 minutes, competing for CPU/IO with
+# bill-pay's ordinary transactional writes on the same MSSQL instance.
+#
+# Ledger only holds a few dozen seed rows (see transaction_service/mssql/init.sql)
+# — too small to sustain a multi-minute scan on its own, so the analytics query
+# targets BankTransactions instead. This is a resource-contention story (both
+# queries stay runnable, both just get slower), not a blocking story like
+# Act 2's lock injector — nothing here takes locks or holds a transaction open.
+#
+# Apply:  kubectl apply -f analytics-scan-job.yaml
+# Remove: kubectl delete -f analytics-scan-job.yaml  (or wait for the 5m loop to finish)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: database-performance-matrix-act3-analytics-scan
+  namespace: relibank
+  labels:
+    app: relibank
+    experiment-type: analytics-scan
+    scenario: database-performance-matrix-act3
+spec:
+  ttlSecondsAfterFinished: 30
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: relibank
+        experiment-type: analytics-scan
+        scenario: database-performance-matrix-act3
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: analytics-scan
+        # NOTE: this cluster uses kustomize overlays that remap
+        # the bare "mssql-custom" alias to a full registry path. That remap only applies
+        # to resources applied via `kubectl apply -k` — this Job is applied
+        # standalone (`kubectl apply -f`), so it needs the resolved image directly.
+        # The image is configurable via envsubst at apply time (see trigger.sh).
+        image: ${MSSQL_CUSTOM_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command:
+          - /opt/mssql-tools18/bin/sqlcmd
+          - -S
+          - mssql-0
+          - -U
+          - $(MSSQL_SA_USER)
+          - -P
+          - $(MSSQL_SA_PASSWORD)
+          - -C
+          - -d
+          - RelibankDB
+          - -Q
+          - |
+            DECLARE @EndTime DATETIME = DATEADD(MINUTE, 5, GETDATE());
+            WHILE GETDATE() < @EndTime
+            BEGIN
+                SELECT
+                    m.Category,
+                    m.Region,
+                    COUNT(*) AS TxnCount,
+                    SUM(bt.Amount) AS TotalAmount,
+                    AVG(bt.Amount) AS AvgAmount,
+                    CHECKSUM_AGG(CHECKSUM(bt.TxnID, bt.AccountID, bt.Amount)) AS ChkAgg
+                FROM BankTransactions bt
+                INNER JOIN Merchants m ON m.MerchantID = bt.MerchantID
+                WHERE DATEADD(SECOND, 0, bt.TxnDate) >= '2000-01-01'
+                GROUP BY m.Category, m.Region
+                ORDER BY TotalAmount DESC;
+            END
+        env:
+        - name: MSSQL_SA_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: MSSQL_SA_PASSWORD
+        - name: MSSQL_SA_USER
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: MSSQL_SA_USER
+        resources:
+          requests:
+            cpu: "10m"
+            memory: "32Mi"
+          limits:
+            cpu: "50m"
+            memory: "64Mi"

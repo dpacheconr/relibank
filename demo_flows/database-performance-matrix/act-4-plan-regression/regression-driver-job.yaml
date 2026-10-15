@@ -1,0 +1,70 @@
+# Database Performance Matrix, Act 4: Plan Regression: Account-Lookup Driver
+# Loops for ~5 minutes running the target account-lookup query against
+# BankTransactions (2M rows). At baseline this seeks via IX_BankTxn_Account;
+# once index-drop-job.yaml runs, the same query flips to a clustered index
+# scan — the plan-hash change and logical-reads spike DB 360 surfaces.
+# AccountID 12345 is one of the seed accounts already used in Ledger
+# (transaction_service/mssql/init.sql), keeping the story's account
+# consistent with the rest of the demo.
+#
+# IMPORTANT: each loop iteration invokes sqlcmd as its own single-statement
+# batch (a bash loop, not one big T-SQL WHILE-loop batch). One clean statement
+# per sqlcmd invocation ensures the top_query_collection normalizer/ranker
+# surfaces each query, and matches how the app's own pyodbc-issued queries
+# get normalized and ranked.
+#
+# Apply:  kubectl apply -f regression-driver-job.yaml
+# Remove: kubectl delete -f regression-driver-job.yaml (or wait for the 5m loop to finish)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: database-performance-matrix-act4-regression-driver
+  namespace: relibank
+  labels:
+    app: relibank
+    experiment-type: plan-regression
+    scenario: database-performance-matrix-act4
+spec:
+  ttlSecondsAfterFinished: 30
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: relibank
+        experiment-type: plan-regression
+        scenario: database-performance-matrix-act4
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: regression-driver
+        image: ${MSSQL_CUSTOM_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command:
+          - /bin/bash
+          - -c
+          - |
+            END=$((SECONDS+300))
+            while [ $SECONDS -lt $END ]; do
+              /opt/mssql-tools18/bin/sqlcmd -S mssql-0 -U "$MSSQL_SA_USER" -P "$MSSQL_SA_PASSWORD" -C -d RelibankDB -Q \
+                "SELECT TxnID, AccountID, MerchantID, Amount, TxnDate, TxnType, Status, Channel FROM BankTransactions WHERE AccountID = 12345 ORDER BY TxnDate DESC;" \
+                > /dev/null
+              sleep 1
+            done
+        env:
+        - name: MSSQL_SA_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: MSSQL_SA_PASSWORD
+        - name: MSSQL_SA_USER
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: MSSQL_SA_USER
+        resources:
+          requests:
+            cpu: "10m"
+            memory: "32Mi"
+          limits:
+            cpu: "50m"
+            memory: "64Mi"

@@ -1,0 +1,16 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: support-service
+  namespace: relibank
+spec:
+  template:
+    metadata:
+      annotations:
+        instrumentation.newrelic.com/inject-python: "true"
+      labels:
+        nr-apm-instrumented: "true"
+        team: ai-ops
+    spec:
+      containers:
+        - name: support-service

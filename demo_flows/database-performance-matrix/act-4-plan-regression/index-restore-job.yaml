@@ -1,0 +1,62 @@
+# Database Performance Matrix, Act 4: Plan Regression: Index Restore
+# Recreates IX_BankTxn_Account with its exact original definition
+# (transaction_service/mssql/init.sql:414). Schema-only, no data touched —
+# restores the account-lookup query's plan back to an index seek.
+#
+# Apply:  kubectl apply -f index-restore-job.yaml
+# Remove: kubectl delete -f index-restore-job.yaml  (auto-cleans via TTL anyway)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: database-performance-matrix-act4-index-restore
+  namespace: relibank
+  labels:
+    app: relibank
+    experiment-type: plan-regression
+    scenario: database-performance-matrix-act4
+spec:
+  ttlSecondsAfterFinished: 30
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: relibank
+        experiment-type: plan-regression
+        scenario: database-performance-matrix-act4
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: index-restore
+        image: ${MSSQL_CUSTOM_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command:
+          - /opt/mssql-tools18/bin/sqlcmd
+          - -S
+          - mssql-0
+          - -U
+          - $(MSSQL_SA_USER)
+          - -P
+          - $(MSSQL_SA_PASSWORD)
+          - -C
+          - -d
+          - RelibankDB
+          - -Q
+          - "CREATE INDEX IX_BankTxn_Account ON BankTransactions (AccountID);"
+        env:
+        - name: MSSQL_SA_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: MSSQL_SA_PASSWORD
+        - name: MSSQL_SA_USER
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: MSSQL_SA_USER
+        resources:
+          requests:
+            cpu: "10m"
+            memory: "32Mi"
+          limits:
+            cpu: "50m"
+            memory: "64Mi"

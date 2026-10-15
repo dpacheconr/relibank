@@ -1,0 +1,16 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: accounts-service
+  namespace: relibank
+spec:
+  template:
+    metadata:
+      annotations:
+        instrumentation.newrelic.com/inject-python: "true"
+      labels:
+        nr-apm-instrumented: "true"
+        team: banking
+    spec:
+      containers:
+        - name: accounts-service

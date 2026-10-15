@@ -37,11 +37,13 @@ resources:
 - services/accounts-service-deployment.yaml
 - services/auth-service-deployment.yaml
 - services/bill-pay-service-deployment.yaml
+- services/bill-pay-hpa.yaml
 - services/notifications-service-deployment.yaml
 - services/scheduler-service-deployment.yaml
 - services/transaction-service-deployment.yaml
 - services/support-service-deployment.yaml
 - services/scenario-service-deployment.yaml
+- services/scenario-runner-rbac.yaml
 - services/risk-assessment-service-deployment.yaml
 
 # Chaos Mesh

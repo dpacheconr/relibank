@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nr-scenario-context
+  namespace: relibank
+data:
+  # Updated by each scenario trigger script before calling `argocd app sync relibank --force`.
+  # ArgoCD creates this ConfigMap on first deploy but never overwrites in-cluster patches
+  # (ignoreDifferences in argocd/apps/relibank.yaml keeps live values intact).
+  SCENARIO: "0"
+  SCENARIO_NAME: "Baseline"
+  CHANGE_TYPE: "DEPLOYMENT"
+  # DEPLOYMENT | CHAOS | CONFIG | SECURITY | INFRASTRUCTURE | GOVERNANCE
+  CHANGE_DESCRIPTION: "ArgoCD sync — relibank staging"
+  CHANGE_VERSION: "manual"
+  # APM | K8S_CLUSTER | INFRA_HOST | ALL
+  TARGET_ENTITIES: "APM"

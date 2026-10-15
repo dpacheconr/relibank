@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Extend the Azure Prod overlay so all production-grade patches (AMD64 affinity/toleration,
+# ACR image references, infrastructure config) are inherited.
+resources:
+  - ../azure-prod
+
+# One patch file per service — adds the NR inject annotation.
+# risk-assessment-service is intentionally excluded — it is the uninstrumented
+# "Shadow IT" service used in the Shadow IT Discovery demo pivot (see overlays/demo/).
+
+patches:
+  - path: patch-accounts-service.yaml
+  - path: patch-auth-service.yaml
+  - path: patch-bill-pay-service.yaml
+  - path: patch-notifications-service.yaml
+  - path: patch-scheduler-service.yaml
+  - path: patch-support-service.yaml
+  - path: patch-transaction-service.yaml

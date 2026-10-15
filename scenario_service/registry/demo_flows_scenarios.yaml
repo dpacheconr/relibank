@@ -1,0 +1,211 @@
+# Registry of demo_flows/<scenario>/act-N-* scenarios wired into the
+# scenario runner as generic "script" type entries. Each entry's trigger.sh
+# is the single source of truth for behavior — this file only tells the
+# runner where to find it and how to present its actions in the UI.
+#
+# actions[].verb    must match a case arm in the scenario's trigger.sh
+# actions[].style   danger | default | info  (button color in the UI)
+# actions[].confirm true  -> UI shows a confirm() dialog and the backend
+#                            requires ?confirm=true before running it
+# actions[].active  true  -> running this verb marks the scenario "active"
+#                            in the scenario-runner's in-memory tracker
+#                   false -> running this verb clears "active" for the
+#                            scenario (used as the Active Scenarios "stop"
+#                            action). Omit for verbs that don't affect
+#                            tracked state (status, fire-and-forget bursts).
+# group             scenario name (Confluence "MVP Demo Scenarios
+#                   (Merged Groupings)" page) — entries sharing a group are
+#                   rendered together under one heading in index.html.
+# act               integer, this entry's Act number within its group —
+#                   entries are ordered by this within a group's section.
+#                   Omitted for single-entry scenarios that have no Acts
+#                   (e.g. Workload Right-Sizing) — those render in their own single-entry
+#                   "group" so the UI's grouping logic has one consistent
+#                   shape to iterate.
+
+- id: database-performance-matrix/act-1-resource-starvation
+  title: "Database Performance Matrix, Act 1: Resource Starvation"
+  description: "StressChaos (CPU+memory) plus NetworkChaos (latency) targeting the mssql pod."
+  dir: database-performance-matrix/act-1-resource-starvation
+  cloud: any
+  group: "Database Performance Matrix"
+  act: 1
+  actions:
+    - {verb: start, label: "Start Outage", style: danger, confirm: true, active: true}
+    - {verb: stop, label: "Stop Outage", style: default, active: false}
+    - {verb: status, label: "Status", style: info}
+
+- id: database-performance-matrix/act-2-lock-contention
+  title: "Database Performance Matrix, Act 2: Lock Contention"
+  description: "Runs a Job that holds an exclusive lock on BankTransactions for ~10m."
+  dir: database-performance-matrix/act-2-lock-contention
+  cloud: any
+  group: "Database Performance Matrix"
+  act: 2
+  actions:
+    - {verb: enable, label: "Enable Lock", style: danger, confirm: true, active: true}
+    - {verb: disable, label: "Disable Lock", style: default, active: false}
+    - {verb: status, label: "Status", style: info}
+
+- id: database-performance-matrix/act-3-competing-query
+  title: "Database Performance Matrix, Act 3: Competing Query"
+  description: "Runs an unindexed analytics scan Job competing for CPU/IO with bill-pay writes."
+  dir: database-performance-matrix/act-3-competing-query
+  cloud: any
+  group: "Database Performance Matrix"
+  act: 3
+  actions:
+    - {verb: enable, label: "Enable Scan", style: danger, confirm: true, active: true}
+    - {verb: disable, label: "Disable Scan", style: default, active: false}
+    - {verb: status, label: "Status", style: info}
+
+- id: database-performance-matrix/act-4-plan-regression
+  title: "Database Performance Matrix, Act 4: Plan Regression"
+  description: "Drops an index on BankTransactions and drives a lookup query for ~5m (plan regression)."
+  dir: database-performance-matrix/act-4-plan-regression
+  cloud: any
+  group: "Database Performance Matrix"
+  act: 4
+  actions:
+    - {verb: enable, label: "Drop Index + Drive Query", style: danger, confirm: true, active: true}
+    - {verb: disable, label: "Restore Index", style: default, active: false}
+    - {verb: status, label: "Status", style: info}
+
+- id: database-performance-matrix/act-5-connection-pool-degradation
+  title: "Database Performance Matrix, Act 5: Connection Pool Degradation"
+  description: "Injects a 500ms hold on accounts-service db pool-a so half of the requests slow down."
+  dir: database-performance-matrix/act-5-connection-pool-degradation
+  cloud: any
+  group: "Database Performance Matrix"
+  act: 5
+  actions:
+    - {verb: start, label: "Enable Pool Stress", style: danger, confirm: true, active: true}
+    - {verb: stop, label: "Disable Pool Stress", style: default, active: false}
+    - {verb: reset, label: "Reset Pool Scenarios", style: default}
+    - {verb: status, label: "Status", style: info}
+
+- id: shadow-it-discovery/act-2-instrumentation
+  title: "The Shadow IT Discovery, Act 2: Instrumentation Coverage"
+  description: "Labels uninstrumented services so the k8s-agents-operator injects the APM agent (coverage goes up)."
+  dir: shadow-it-discovery/act-2-instrumentation
+  cloud: any
+  group: "The Shadow IT Discovery"
+  act: 2
+  actions:
+    - {verb: start, label: "Instrument Services", style: default, confirm: true, active: true}
+    - {verb: stop, label: "Remove Instrumentation", style: default, active: false}
+    - {verb: status, label: "Status", style: info}
+
+- id: workload-right-sizing
+  title: "Workload Right-Sizing"
+  description: "Overprovisioned risk-assessment-service (2vCPU/4Gi) runs at ~5% CPU / ~10% memory. K8s 360 detects the gap; CCI quantifies cost impact and recommends right-sizing."
+  dir: workload-right-sizing
+  cloud: any
+  group: "Workload Right-Sizing"
+  actions:
+    - {verb: overprovision, label: "Apply Overprovision (2vCPU/4Gi)", style: danger, confirm: true, active: true}
+    - {verb: right-size, label: "Apply Right-Size (100m/128Mi)", style: default, active: false}
+    - {verb: status, label: "Status", style: info}
+
+- id: gitops-failure
+  title: "GitOps Failure"
+  description: "Bumps support_service to a CVE-pinned dependency and force-merges past the NR tag-compliance CI gate, dropping the Scorecard. Triggered via GitHub Actions workflow_dispatch (.github/workflows/gitops-failure.yml) — scenario-runner lacks gh/terraform."
+  dir: gitops-failure
+  cloud: any
+  group: "GitOps Failure"
+  actions:
+    # NOTE: Actions moved to .github/workflows/gitops-failure.yml workflow_dispatch
+    # Scenario-runner pod lacks gh (GitHub CLI) and terraform; use GitHub Actions workflow:
+    #   gh workflow run gitops-failure.yml -f action=<verb> [-f base_branch=<branch>]
+    - {verb: create-pr, label: "[GH Actions] Create Non-Compliant PR", style: default, active: true}
+    - {verb: merge, label: "[GH Actions] Force-Merge PR", style: danger, confirm: true}
+    - {verb: cve-only, label: "[GH Actions] CVE-Only (no PR)", style: danger, confirm: true}
+    - {verb: cve-restore, label: "[GH Actions] Restore Safe Dependency", style: default}
+    - {verb: status, label: "[GH Actions] Status", style: info}
+    - {verb: rollback, label: "[GH Actions] Rollback", style: default, active: false}
+
+- id: node-pressure
+  title: "Node Pressure"
+  description: "Scales the AKS node pool 3->2 through the AKS API (visible in Azure Activity Log / Change Tracking) and applies memory stress across every service pod."
+  dir: node-pressure
+  cloud: azure
+  group: "Node Pressure"
+  actions:
+    - {verb: start, label: "Start Node Pressure", style: danger, confirm: true, active: true}
+    - {verb: stop, label: "Stop Node Pressure", style: default, active: false}
+    - {verb: status, label: "Status", style: info}
+
+- id: noisy-neighbor
+  title: "The Noisy Neighbour"
+  description: "Squeezes bill-pay/transaction-service, deploys a CPU-hungry batch-analytics neighbor on the same node and runs a 50-user / 15m burst."
+  dir: noisy-neighbor
+  cloud: any
+  group: "The Noisy Neighbour"
+  actions:
+    - {verb: start, label: "Start Noisy Neighbour", style: danger, confirm: true, active: true}
+    - {verb: stop, label: "Stop and Restore", style: default, active: false}
+    - {verb: neighbor-start, label: "Squeeze Victims + Deploy Neighbor", style: danger, confirm: true, active: true}
+    - {verb: neighbor-stop, label: "Restore Victims + Remove Neighbor", style: default, active: false}
+    - {verb: burst, label: "Run 50-User Burst", style: default, confirm: true}
+    - {verb: cap, label: "Cap HPA to 2 Replicas", style: danger, confirm: true}
+    - {verb: uncap, label: "Restore HPA to 5 Replicas", style: default}
+    - {verb: status, label: "Status", style: info}
+
+- id: the-pair/act-1-cloud-drift
+  title: "The Pair, Act 1: Cloud Drift"
+  description: "Azure NSG deny rule + CoreDNS starvation create a cluster outage invisible to Kubernetes and the app layer (visible only in Azure Activity Log)."
+  dir: the-pair/act-1-cloud-drift
+  cloud: azure
+  group: "The Pair"
+  act: 1
+  actions:
+    - {verb: start, label: "Start Cloud Drift", style: danger, confirm: true, active: true}
+    - {verb: stop, label: "Stop Cloud Drift", style: default, active: false}
+    - {verb: status, label: "Status", style: info}
+
+- id: the-pair/act-2-dns-black-hole
+  title: "The Pair, Act 2: DNS Black Hole"
+  description: "Chaos Mesh DNSChaos injects SERVFAIL responses on service discovery, surfaced via eBPF and MCP."
+  dir: the-pair/act-2-dns-black-hole
+  cloud: azure
+  group: "The Pair"
+  act: 2
+  actions:
+    - {verb: start, label: "Start DNS Black Hole", style: danger, confirm: true, active: true}
+    - {verb: stop, label: "Stop DNS Black Hole", style: default, active: false}
+    - {verb: status, label: "Status", style: info}
+
+- id: the-exposure/act-1-supply-chain-cve
+  title: "The Exposure, Act 1: Supply-Chain CVE"
+  description: "APM-layer vulnerability: support-service pinned to requests==2.18.0 (CVE-2018-18074, CVE-2023-32681), detected via NR Security RX."
+  dir: the-exposure/act-1-supply-chain-cve
+  cloud: azure
+  group: "The Exposure"
+  act: 1
+  actions:
+    - {verb: cve-only, label: "Introduce CVE Dependency", style: danger, confirm: true, active: true}
+    - {verb: cve-restore, label: "Remediate CVE Dependency", style: default, active: false}
+
+- id: the-exposure/act-2-node-level-cve
+  title: "The Exposure, Act 2: Node-Level CVE"
+  description: "Infrastructure-layer vulnerability: New Relic Infrastructure agent reports OS package CVEs from AKS nodes, findings correlated with running APM apps in NR."
+  dir: the-exposure/act-2-node-level-cve
+  cloud: azure
+  group: "The Exposure"
+  act: 2
+  actions:
+    - {verb: start, label: "Verify Infrastructure Agent & Report Nodes", style: danger, confirm: true, active: true}
+    - {verb: status, label: "Query NR Correlation", style: info}
+    - {verb: stop, label: "Status (Read-Only)", style: default, active: false}
+
+- id: security-group-misconfiguration
+  title: "Security Group Misconfiguration"
+  description: "AKS node NSG exposed to internet (0.0.0.0/0 on ports 1433, 5432) — NSG rule changes automatically captured via Azure integration (visible on AKS entity timeline in New Relic)."
+  dir: security-group-misconfiguration
+  cloud: azure
+  group: "Security Group Misconfiguration"
+  actions:
+    - {verb: enable, label: "Enable Misconfiguration", style: danger, confirm: true, active: true}
+    - {verb: cleanup, label: "Remove Misconfiguration", style: default, active: false}
+    - {verb: status, label: "Status", style: info}
+

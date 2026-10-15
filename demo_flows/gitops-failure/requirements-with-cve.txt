@@ -1,0 +1,21 @@
+# support_service/requirements.txt — DEMO BAD VERSION
+# This file pins requests==2.18.0 which carries known CVEs:
+#   CVE-2018-18074 — Redirect header exposure (requests <=2.19)
+#   CVE-2023-32681 — Proxy credential leakage (requests <2.31.0)
+#
+# Used in the GitOps Failure demo to show a CVE-pinned dependency.
+# DO NOT use in production — upgrade to requests>=2.31.0
+
+fastapi>=0.116.1
+uvicorn[standard]>=0.35.0
+httpx>=0.28.1
+pydantic>=2.12.0a1
+newrelic @ git+https://github.com/newrelic/newrelic-python-agent.git@main
+gunicorn>=23.0.0,<24
+openai>=1.108.0
+langgraph>=1.0.8
+langchain-core>=1.2.13
+langchain-openai>=1.1.10
+langchain>=1.2.10
+tiktoken>=0.5.0
+requests==2.18.0

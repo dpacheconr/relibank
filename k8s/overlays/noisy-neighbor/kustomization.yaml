@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+metadata:
+  name: noisy-neighbor
+  namespace: relibank
+
+resources:
+  - batch-analytics-deployment.yaml

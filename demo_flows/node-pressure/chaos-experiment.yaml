@@ -1,0 +1,104 @@
+# Node Pressure
+# Memory pressure on EVERY relibank service pod at once, with no single culprit workload.
+# Each memory stressor is sized to push its pod to ~85-90% of its own memory limit (limit
+# minus typical usage minus headroom), so every service sits near OOM together. A CPU
+# stressor also competes with the app for its CPU quota, so latency climbs on every
+# service. Sizes are tied to the limits in k8s/base/services/*; re-tune if those change.
+#
+# Apply:  kubectl apply -f chaos-experiment.yaml
+# Remove: kubectl delete -f chaos-experiment.yaml
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: node-pressure-bill-pay
+  namespace: relibank
+  labels: {app: relibank, experiment-type: stress-chaos, scenario: node-pressure}
+spec:
+  mode: all
+  selector:
+    namespaces: [relibank]
+    labelSelectors: {app: bill-pay-service}
+  duration: 30m
+  stressors:
+    cpu: {workers: 1, load: 90}
+    memory: {workers: 1, size: 400MB}
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: node-pressure-transaction
+  namespace: relibank
+  labels: {app: relibank, experiment-type: stress-chaos, scenario: node-pressure}
+spec:
+  mode: all
+  selector:
+    namespaces: [relibank]
+    labelSelectors: {app: transaction-service}
+  duration: 30m
+  stressors:
+    cpu: {workers: 1, load: 90}
+    memory: {workers: 1, size: 750MB}
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: node-pressure-accounts
+  namespace: relibank
+  labels: {app: relibank, experiment-type: stress-chaos, scenario: node-pressure}
+spec:
+  mode: all
+  selector:
+    namespaces: [relibank]
+    labelSelectors: {app: accounts-service}
+  duration: 30m
+  stressors:
+    cpu: {workers: 1, load: 90}
+    memory: {workers: 1, size: 450MB}
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: node-pressure-auth
+  namespace: relibank
+  labels: {app: relibank, experiment-type: stress-chaos, scenario: node-pressure}
+spec:
+  mode: all
+  selector:
+    namespaces: [relibank]
+    labelSelectors: {app: auth-service}
+  duration: 30m
+  stressors:
+    cpu: {workers: 1, load: 90}
+    memory: {workers: 1, size: 180MB}
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: node-pressure-notifications
+  namespace: relibank
+  labels: {app: relibank, experiment-type: stress-chaos, scenario: node-pressure}
+spec:
+  mode: all
+  selector:
+    namespaces: [relibank]
+    labelSelectors: {app: notifications-service}
+  duration: 30m
+  stressors:
+    cpu: {workers: 1, load: 90}
+    memory: {workers: 1, size: 190MB}
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: node-pressure-support
+  namespace: relibank
+  labels: {app: relibank, experiment-type: stress-chaos, scenario: node-pressure}
+spec:
+  mode: all
+  selector:
+    namespaces: [relibank]
+    labelSelectors: {app: support-service}
+  duration: 30m
+  stressors:
+    cpu: {workers: 1, load: 90}
+    memory: {workers: 1, size: 90MB}

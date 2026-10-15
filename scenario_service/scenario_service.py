@@ -9,6 +9,7 @@ import os
 import uuid
 import yaml
 from pathlib import Path
+import subprocess
 import sys
 import asyncio
 import logging
@@ -50,6 +51,30 @@ SCENARIO_UI_ENABLED = os.getenv("SCENARIO_UI_ENABLED", "true").lower() == "true"
 # Dictionary to store parsed Chaos Mesh experiments
 CHAOS_EXPERIMENTS: Dict[str, Dict[str, Any]] = {}
 STRESS_EXPERIMENTS: Dict[str, Dict[str, Any]] = {}
+
+# demo_flows/*/trigger.sh scripts wired in generically via their own
+# action registry (see registry/demo_flows_scenarios.yaml)
+SCRIPT_SCENARIOS: dict[str, dict[str, Any]] = {}
+# Best-effort "is this scenario currently on" tracker for script scenarios,
+# driven by the registry's actions[].active flag (see run_script()). This is
+# this process's belief about cluster state, not a live read of it — it can
+# drift if a script fails silently or trigger.sh is run outside the API.
+SCRIPT_SCENARIO_STATE: dict[str, dict[str, Any]] = {}
+# scenario_service.py and demo_flows/ both land under /app in the image (see
+# Dockerfile) — the repo-root context also brings along .git + support_service
+# so demo flow trigger scripts can `git checkout` tracked files.
+DEMO_FLOWS_DIR = Path(__file__).parent / "demo_flows"
+CLOUD_PROVIDER = os.environ.get("CLOUD_PROVIDER", "").lower()
+
+# Separate rate limiter for script-backed scenarios so a slow/destructive
+# demo_flows action can't be
+# fired back-to-back any more freely than a chaos-mesh trigger can.
+SCRIPT_RATE_LIMIT = {
+    "last_trigger_time": None,
+    "cooldown_minutes": None,  # set from get_cooldown_minutes() at startup
+    "max_concurrent": 3,
+    "active_runs": 0,
+}
 
 # Kubernetes API clients for custom resources
 api_client = None
@@ -275,6 +300,33 @@ async def lifespan(app: FastAPI):
     except yaml.YAMLError as e:
         print(f"Error parsing stress YAML file: {e}. Check YAML format.")
 
+    # Load the demo_flows script registry
+    script_registry_file = base_dir / "registry" / "demo_flows_scenarios.yaml"
+    script_count = 0
+    try:
+        print(f"INFO: Attempting to read script scenario registry from: {script_registry_file}")
+        with open(script_registry_file, "r") as file:
+            for entry in yaml.safe_load(file) or []:
+                # Skip scenarios not applicable to this cloud provider
+                if entry.get("cloud", "any") not in ("any", CLOUD_PROVIDER):
+                    continue
+
+                SCRIPT_SCENARIOS[entry["id"]] = entry
+                script_count += 1
+
+                # Validate trigger.sh exists
+                scenario_dir = entry.get("dir")
+                if scenario_dir:
+                    trigger_sh = os.path.join("demo_flows", scenario_dir, "trigger.sh")
+                    if not os.path.exists(trigger_sh):
+                        print(f"WARNING: Script scenario '{entry['id']}' missing trigger.sh at {trigger_sh}")
+                    elif not os.access(trigger_sh, os.X_OK):
+                        print(f"WARNING: Script scenario '{entry['id']}' trigger.sh not executable: {trigger_sh}")
+    except FileNotFoundError:
+        print(f"Error: The script scenario registry was not found at '{script_registry_file}'.")
+    except yaml.YAMLError as e:
+        print(f"Error parsing script scenario registry YAML file: {e}. Check YAML format.")
+
     # Initialize Kubernetes client from within the pod
     try:
         config.load_incluster_config()
@@ -283,6 +335,9 @@ async def lifespan(app: FastAPI):
         config.load_kube_config()
     
     api_client = client.CustomObjectsApi()
+
+    # Initialize script rate limiter with cooldown based on environment
+    SCRIPT_RATE_LIMIT["cooldown_minutes"] = get_cooldown_minutes()
 
     print(f"Chaos experiments loaded successfully on startup. Total: {loaded_count} experiments ({len(CHAOS_EXPERIMENTS)} pod chaos, {len(STRESS_EXPERIMENTS)} stress chaos)")
     yield
@@ -893,6 +948,83 @@ async def run_locust_test(locustfile_name: str, num_users: int = 1):
         # Restore sys.argv and sys.exit to their original states
         sys.argv = original_argv
         sys.exit = original_exit
+
+@app.post("/scenario-runner/api/run_script/{scenario_id:path}/{verb}")
+def run_script(scenario_id: str, verb: str, confirm: bool = False):
+    """
+    Runs a demo_flows/*/trigger.sh <verb> inside the pod.
+
+    Defined as a sync `def` (not `async def`) so Starlette offloads the
+    blocking subprocess call to its worker threadpool automatically,
+    instead of blocking the event loop.
+    """
+    scenario = SCRIPT_SCENARIOS.get(scenario_id)
+    if scenario is None:
+        return {"status": "error", "message": f"Scenario '{scenario_id}' not found."}
+
+    action = next((a for a in scenario.get("actions", []) if a["verb"] == verb), None)
+    if action is None:
+        return {"status": "error", "message": f"'{verb}' is not a valid action for '{scenario_id}'."}
+
+    if action.get("confirm") and not confirm:
+        return {
+            "status": "error",
+            "message": f"'{verb}' on '{scenario_id}' requires confirmation. Retry with confirm=true.",
+        }
+
+    now = datetime.now()
+    if action.get("confirm"):
+        last_trigger = SCRIPT_RATE_LIMIT["last_trigger_time"]
+        cooldown_minutes = SCRIPT_RATE_LIMIT["cooldown_minutes"]
+        if last_trigger:
+            time_since_last = now - last_trigger
+            if time_since_last < timedelta(minutes=cooldown_minutes):
+                remaining_seconds = int((timedelta(minutes=cooldown_minutes) - time_since_last).total_seconds())
+                return {
+                    "status": "error",
+                    "message": f"Rate limit exceeded. Please wait {remaining_seconds} seconds before running another scenario action.",
+                    "cooldown_remaining_seconds": remaining_seconds,
+                }
+        if SCRIPT_RATE_LIMIT["active_runs"] >= SCRIPT_RATE_LIMIT["max_concurrent"]:
+            return {
+                "status": "error",
+                "message": f"Maximum concurrent scenario runs ({SCRIPT_RATE_LIMIT['max_concurrent']}) reached. Please wait for active runs to complete.",
+                "active_runs": SCRIPT_RATE_LIMIT["active_runs"],
+            }
+
+    if action.get("confirm"):
+        SCRIPT_RATE_LIMIT["last_trigger_time"] = now
+        SCRIPT_RATE_LIMIT["active_runs"] += 1
+
+    trigger_script = DEMO_FLOWS_DIR / scenario["dir"] / "trigger.sh"
+    try:
+        result = subprocess.run(
+            ["bash", str(trigger_script), verb],
+            cwd=str(trigger_script.parent),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "message": f"'{scenario_id} {verb}' timed out after 300s."}
+    finally:
+        if action.get("confirm"):
+            SCRIPT_RATE_LIMIT["active_runs"] -= 1
+
+    if result.returncode == 0:
+        if action.get("active") is True:
+            SCRIPT_SCENARIO_STATE[scenario_id] = {"active": True, "verb": verb, "started_at": now.isoformat()}
+        elif action.get("active") is False:
+            SCRIPT_SCENARIO_STATE.pop(scenario_id, None)
+
+    return {
+        "status": "success" if result.returncode == 0 else "error",
+        "message": f"'{scenario_id} {verb}' exited with code {result.returncode}.",
+        "returncode": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+
 
 @app.get("/scenario-runner")
 async def ok():

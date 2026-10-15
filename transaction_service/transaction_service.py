@@ -248,6 +248,8 @@ producer = None
 consumer_task = None
 db_connection = None
 
+DB_QUERY_TIMEOUT = int(os.getenv("DB_QUERY_TIMEOUT", "1"))
+
 
 def get_db_connection():
     """
@@ -255,6 +257,7 @@ def get_db_connection():
     """
     try:
         cnxn = pyodbc.connect(CONNECTION_STRING, autocommit=True)
+        cnxn.timeout = DB_QUERY_TIMEOUT
         logging.info("Successfully connected to MSSQL database.")
         return cnxn
     except Exception as e:

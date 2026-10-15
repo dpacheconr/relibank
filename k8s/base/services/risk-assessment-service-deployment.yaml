@@ -14,8 +14,10 @@ spec:
     metadata:
       annotations:
         newrelic.com/integrations-sidecar-skip-injection: "true"
+        newrelic.com/disable-injection: "true"
       labels:
         app: risk-assessment-service
+        newrelic-metadata-injection: disabled
     spec:
       containers:
         - env:

@@ -1,0 +1,136 @@
+name: NR Change Tracking
+
+# NOTE: This workflow_call reusable is NOT currently wired to build-push-images.yml.
+# The canonical NR change tracking path is the Argo CD PostSync Job in
+# k8s/base/jobs/nr-change-tracking-hook.yaml — it fires after every sync and
+# requires the nr-secrets k8s secret (created via terraform-managed secrets).
+# This file is kept as a manual-trigger fallback (workflow_dispatch) only.
+#
+# Originally: reusable workflow called from build-push-images.yml after image tags are updated.
+# Sends a changeTrackingCreateDeployment event for each APM service to New Relic.
+#
+# DORA data this feeds:
+#   Deployment Frequency — each event increments deployment_count (SINCE 30 days ago)
+#   Lead Time for Changes — commit field is JOIN key to GitHubPullRequest.commitSha
+#   MTTR — not directly; NrAiIncident data comes from NR alert rules
+#   CFR — via ChangeTrackingEvent (requires NR GitHub integration + Deployment status webhooks)
+#
+# Prerequisites:
+#   GitHub Secrets: NR_USER_API_KEY
+#   GitHub Variables: NR_ACCOUNT_ID, APP_NAME (default: relibank)
+#   NR GitHub Integration set up (for Lead Time GitHubPullRequest JOIN): see terraform/newrelic/integrations/README.md
+
+on:
+  workflow_call:
+    inputs:
+      commit_sha:
+        description: "Git commit SHA for the deployment (used as JOIN key for Lead Time)"
+        type: string
+        required: true
+      environment:
+        description: "Deployment environment (staging, prod)"
+        type: string
+        default: staging
+      deployer:
+        description: "Who triggered the deployment (for audit trail)"
+        type: string
+        default: github-actions
+
+  # Allow manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "Commit SHA to mark as deployed"
+        type: string
+        required: false
+      environment:
+        description: "Environment"
+        type: string
+        default: staging
+      gh_environment:
+        description: "GitHub Environment for scoped vars/secrets (leave empty for repo-level defaults)"
+        type: string
+        default: ''
+
+jobs:
+  change-tracking:
+    name: NR Change Tracking
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.gh_environment != '' && inputs.gh_environment || null }}
+
+    steps:
+      - name: Send Change Tracking events to New Relic
+        env:
+          NR_USER_API_KEY: ${{ secrets.NR_USER_API_KEY }}
+          NR_ACCOUNT_ID: ${{ vars.NR_ACCOUNT_ID }}
+          NR_GQL_URL: ${{ vars.NR_GQL_URL }}
+          APP_NAME: ${{ vars.APP_NAME || 'relibank' }}
+          COMMIT_SHA: ${{ inputs.commit_sha || github.sha }}
+          ENVIRONMENT: ${{ inputs.environment || 'staging' }}
+          DEPLOYER: ${{ inputs.deployer || github.actor }}
+        run: |
+          set -euo pipefail
+          NR_GQL="${NR_GQL_URL:-https://api.newrelic.com/graphql}"
+
+          # APM-instrumented services (pattern: ${APP_NAME} - {Service Name})
+          # risk-assessment-service is deliberately uninstrumented (eBPF demo)
+          # frontend-service uses Browser agent, not APM
+          SERVICES=(
+            "${APP_NAME} - Accounts Service"
+            "${APP_NAME} - Auth Service"
+            "${APP_NAME} - Bill Pay Service"
+            "${APP_NAME} - Event Scheduler Service"
+            "${APP_NAME} - Notifications Service"
+            "${APP_NAME} - Support Service"
+            "${APP_NAME} - Transaction Service"
+          )
+
+          SENT=0
+          SKIPPED=0
+          FAILED=0
+
+          for SERVICE_NAME in "${SERVICES[@]}"; do
+            # Look up entity GUID by exact name and account
+            ENTITY_GUID=$(curl -s -X POST "$NR_GQL" \
+              -H "Content-Type: application/json" \
+              -H "API-Key: $NR_USER_API_KEY" \
+              -d "$(jq -n --arg name "$SERVICE_NAME" '{
+                query: "{ actor { entitySearch(query: \"name = '\''\" + $name + \"'\'' AND domain = '\''APM'\'' AND type = '\''APPLICATION'\''\") { results { entities { guid } } } } }"
+              }')" | jq -r '.data.actor.entitySearch.results.entities[0].guid // empty')
+
+            if [[ -z "$ENTITY_GUID" ]]; then
+              echo "⏭  '$SERVICE_NAME' not found in NR (Phase 2 not yet complete) — skipping"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
+
+            # Send deployment event
+            # commit field = git SHA, used by Lead Time rule to JOIN with GitHubPullRequest.commitSha
+            RESULT=$(curl -s -X POST "$NR_GQL" \
+              -H "Content-Type: application/json" \
+              -H "API-Key: $NR_USER_API_KEY" \
+              -d "$(jq -n \
+                --arg guid "$ENTITY_GUID" \
+                --arg version "$COMMIT_SHA" \
+                --arg commit "$COMMIT_SHA" \
+                --arg user "$DEPLOYER" \
+                --arg desc "Deployed to $ENVIRONMENT via GitHub Actions ($COMMIT_SHA)" \
+                '{
+                  query: "mutation($d: ChangeTrackingDeploymentInput!) { changeTrackingCreateDeployment(deployment: $d) { deploymentId entityGuid } }",
+                  variables: {d: {entityGuid: $guid, version: $version, commit: $commit, user: $user, deploymentType: "ROLLING", description: $desc}}
+                }')")
+
+            DEPLOY_ID=$(echo "$RESULT" | jq -r '.data.changeTrackingCreateDeployment.deploymentId // empty')
+            if [[ -n "$DEPLOY_ID" ]]; then
+              echo "✅ '$SERVICE_NAME' guid=$ENTITY_GUID deploymentId=$DEPLOY_ID"
+              SENT=$((SENT + 1))
+            else
+              ERR=$(echo "$RESULT" | jq -r '(.errors // [])[0].message // "unknown"')
+              echo "⚠️  '$SERVICE_NAME' failed: $ERR"
+              FAILED=$((FAILED + 1))
+            fi
+          done
+
+          echo ""
+          echo "Change Tracking summary: sent=$SENT skipped=$SKIPPED failed=$FAILED"
+          [[ $FAILED -eq 0 ]] || exit 1

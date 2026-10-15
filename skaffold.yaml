@@ -142,9 +142,9 @@ build:
     docker:
       dockerfile: risk_assessment_service/Dockerfile
   - image: scenario-runner
-    context: scenario_service
+    context: .
     docker:
-      dockerfile: Dockerfile
+      dockerfile: scenario_service/Dockerfile
   - image: kafka-with-monitoring
     context: kafka_service
     docker:

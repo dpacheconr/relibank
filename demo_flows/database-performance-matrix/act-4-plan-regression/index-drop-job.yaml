@@ -1,0 +1,70 @@
+# Database Performance Matrix, Act 4: Plan Regression: Index Drop
+# Drops the nonclustered index IX_BankTxn_Account on BankTransactions, the
+# index the target account-lookup query relies on for an index seek. After
+# this runs, the same query's plan flips to a clustered index scan across
+# 2M rows — no lock waits, no CPU/IO contention with other queries, just a
+# much worse plan. Schema-only change, no data touched, fully reversible via
+# index-restore-job.yaml.
+#
+# Apply:  kubectl apply -f index-drop-job.yaml
+# Remove: kubectl delete -f index-drop-job.yaml  (auto-cleans via TTL anyway)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: database-performance-matrix-act4-index-drop
+  namespace: relibank
+  labels:
+    app: relibank
+    experiment-type: plan-regression
+    scenario: database-performance-matrix-act4
+spec:
+  ttlSecondsAfterFinished: 30
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: relibank
+        experiment-type: plan-regression
+        scenario: database-performance-matrix-act4
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: index-drop
+        # Resolved image, not the bare "mssql-custom" alias — this Job is
+        # applied standalone (`kubectl apply -f`), so the kustomize remap
+        # that only fires under `kubectl apply -k` doesn't apply here. Same
+        # fix already applied in act-3-competing-query/analytics-scan-job.yaml.
+        # The image is configurable via envsubst at apply time (see trigger.sh).
+        image: ${MSSQL_CUSTOM_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command:
+          - /opt/mssql-tools18/bin/sqlcmd
+          - -S
+          - mssql-0
+          - -U
+          - $(MSSQL_SA_USER)
+          - -P
+          - $(MSSQL_SA_PASSWORD)
+          - -C
+          - -d
+          - RelibankDB
+          - -Q
+          - "DROP INDEX IX_BankTxn_Account ON BankTransactions;"
+        env:
+        - name: MSSQL_SA_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: MSSQL_SA_PASSWORD
+        - name: MSSQL_SA_USER
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: MSSQL_SA_USER
+        resources:
+          requests:
+            cpu: "10m"
+            memory: "32Mi"
+          limits:
+            cpu: "50m"
+            memory: "64Mi"

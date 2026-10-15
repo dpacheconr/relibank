@@ -1,0 +1,147 @@
+---
+# Dedicated ServiceAccount for the scenario runner, so the elevated grants
+# below (batch Jobs, Deployment/HPA patches) are traceable to one identity
+# instead of piggy-backing on the namespace's "default" SA.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: scenario-runner
+  namespace: relibank
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: chaos-experiment-creator
+  namespace: relibank
+rules:
+  # Chaos Mesh CRDs — trigger_chaos/trigger_stress endpoints (dnschaos added
+  # for DNS Black Hole, which the runner didn't create any CRD kind for before).
+  - apiGroups: ["chaos-mesh.org"]
+    resources: ["podchaos", "networkchaos", "iochaos", "stresschaos", "timechaos", "kernelchaos", "httpchaos", "dnschaos"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+
+  # Database Performance Matrix Acts 2-4 — Jobs applied/deleted by trigger.sh
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete", "patch"]
+
+  # Database Performance Matrix Act 4's status check applies a throwaway diagnostic Pod.
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+
+  # demo_flows right-sizing (resource patch), noisy-neighbor (HPA cap/uncap).
+  # watch is needed by `kubectl rollout status`/`set image` (cve-only,
+  # right-sizing) to follow the Deployment until it's ready.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch", "create", "delete"]  # create/delete: noisy-neighbor batch-analytics
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "patch"]
+
+  # Ingresses (noisy-neighbor, the-pair — health check path drift on ingress/services)
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "patch"]
+
+  # Services (noisy-neighbor BASE_URL lookup, the-pair — health check path)
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "patch"]
+
+  # Events (diagnostic read for scenarios)
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
+
+  # demo_flows/the-exposure/act-1-supply-chain-cve's cve-restore verb runs
+  # `kubectl rollout undo deployment/support-service`, which needs to read
+  # the Deployment's ReplicaSets to find the prior revision to roll back to.
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+
+  # demo_flows/lib/nr-scenario.sh's nr_set_context, now invoked from inside
+  # this pod (previously only ever run from an operator's own kubeconfig).
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "patch"]
+    resourceNames: ["nr-scenario-context"]
+
+  # demo_flows/noisy-neighbor — create new ConfigMap for locustfile.
+  # Note: create cannot be scoped by resourceNames in Kubernetes.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+
+  # demo_flows/noisy-neighbor — manage the burst-locustfile ConfigMap.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["burst-locustfile"]
+    verbs: ["get", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scenario-runner-chaos-binding
+  namespace: relibank
+subjects:
+  - kind: ServiceAccount
+    name: scenario-runner
+    namespace: relibank
+roleRef:
+  kind: Role
+  name: chaos-experiment-creator
+  apiGroup: rbac.authorization.k8s.io
+---
+# demo_flows/noisy-neighbor/trigger.sh reads the victim node's allocatable CPU
+# (cluster-scoped) to size the neighbor.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: scenario-runner-node-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: scenario-runner-node-reader-binding
+subjects:
+  - kind: ServiceAccount
+    name: scenario-runner
+    namespace: relibank
+roleRef:
+  kind: ClusterRole
+  name: scenario-runner-node-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+# the-pair/act-1-cloud-drift stresses CoreDNS: the StressChaos lives in relibank but
+# targets kube-system pods, and Chaos Mesh's admission webhook (vauth.kb.io)
+# authorizes the caller in the TARGET namespace, so grant chaos CRDs there only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: scenario-runner-chaos-kube-system
+  namespace: kube-system
+rules:
+  - apiGroups: ["chaos-mesh.org"]
+    resources: ["stresschaos", "podchaos", "networkchaos", "dnschaos"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scenario-runner-chaos-kube-system-binding
+  namespace: kube-system
+subjects:
+  - kind: ServiceAccount
+    name: scenario-runner
+    namespace: relibank
+roleRef:
+  kind: Role
+  name: scenario-runner-chaos-kube-system
+  apiGroup: rbac.authorization.k8s.io

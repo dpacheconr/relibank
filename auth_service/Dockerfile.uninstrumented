@@ -1,0 +1,21 @@
+# Uninstrumented image — no NR Python agent baked in.
+# The NR k8s-agents-operator injects the agent at pod startup when the pod
+# annotation instrumentation.newrelic.com/inject-python: "true" is present.
+# Used by the auto-attach overlay (k8s/overlays/auto-attach/).
+FROM python:3.12
+
+WORKDIR /app
+
+# Copy the requirements file and install dependencies
+COPY auth_service/requirements.txt .
+RUN pip install -r requirements.txt
+
+# Copy the centralized utils directory
+COPY utils /app/utils
+
+# Copy the application code
+COPY auth_service /app
+
+EXPOSE 5002
+
+CMD ["uvicorn", "auth_service:app", "--host", "0.0.0.0", "--port", "5002", "--workers", "1", "--log-config", "logging.conf"]

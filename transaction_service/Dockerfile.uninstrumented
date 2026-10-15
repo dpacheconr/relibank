@@ -1,0 +1,38 @@
+# Uninstrumented image — no NR Python agent baked in.
+# The NR k8s-agents-operator injects the agent at pod startup when the pod
+# annotation instrumentation.newrelic.com/inject-python: "true" is present.
+# Used by the auto-attach overlay (k8s/overlays/auto-attach/).
+FROM python:3.12
+
+WORKDIR /app
+
+# Install build dependencies required for C extensions and the ODBC driver
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    zlib1g-dev \
+    unixodbc-dev \
+    curl \
+    gnupg \
+    lsb-release
+
+# Add the Microsoft ODBC repository for Debian and install the latest driver (msodbcsql18)
+RUN curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /etc/apt/trusted.gpg.d/microsoft-prod.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/trusted.gpg.d/microsoft-prod.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" > /etc/apt/sources.list.d/mssql-release.list \
+    && apt-get update \
+    && ACCEPT_EULA=Y apt-get install -y --no-install-recommends \
+    libodbc2 \
+    msodbcsql18
+
+# Copy the requirements file and install dependencies
+COPY transaction_service/requirements.txt .
+RUN pip install -r requirements.txt
+
+# Copy the centralized utils directory
+COPY utils /app/utils
+
+# Copy the application code
+COPY transaction_service /app
+
+EXPOSE 5000
+
+CMD ["gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "transaction_service:app", "--bind", "0.0.0.0:5000", "--log-config", "logging.conf"]

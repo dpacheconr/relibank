@@ -1,0 +1,239 @@
+# Argo CD PostSync hook — fires after every successful sync.
+# Reads nr-scenario-context ConfigMap (patched by each demo trigger script) to
+# determine which entities to tag and what change type to record.
+#
+# CHANGE_TYPE:      DEPLOYMENT | CHAOS | CONFIG | SECURITY | INFRASTRUCTURE | GOVERNANCE
+# TARGET_ENTITIES:  APM | K8S_CLUSTER | INFRA_HOST | ALL
+#
+# Required k8s Secret:  nr-secrets.newrelic-user-api-key
+# Required k8s Secret:  nr-secrets.newrelic-account-id
+# ArgoCD fires this after every sync; BeforeHookCreation deletes any stale prior instance.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nr-change-tracking
+  namespace: relibank
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: change-tracking
+          image: python:3.12-slim
+          command: ["python3", "-c"]
+          args:
+            - |
+              import json, os, socket, urllib.request, urllib.error
+
+              NR_API_KEY        = os.environ["NR_USER_API_KEY"]
+              NR_ACCOUNT        = int(os.environ.get("NR_ACCOUNT_ID", "0"))
+              APP_NAME          = os.environ.get("APP_NAME", "relibank")
+              COMMIT_SHA        = os.environ.get("IMAGE_TAG", "unknown")
+              NR_GQL            = os.environ.get("NR_GQL_URL", "https://api.newrelic.com/graphql")
+
+              # Scenario context — set by trigger scripts via kubectl patch on nr-scenario-context
+              CHANGE_TYPE       = os.environ.get("CHANGE_TYPE", "DEPLOYMENT")
+              CHANGE_DESCRIPTION = os.environ.get("CHANGE_DESCRIPTION", "ArgoCD sync — relibank staging")
+              TARGET_ENTITIES   = os.environ.get("TARGET_ENTITIES", "APM")
+              SCENARIO          = os.environ.get("SCENARIO", "0")
+              SCENARIO_NAME     = os.environ.get("SCENARIO_NAME", "Baseline")
+              CHANGE_VERSION    = os.environ.get("CHANGE_VERSION") or COMMIT_SHA
+
+              DEPLOY_TYPE = "ROLLING" if CHANGE_TYPE == "DEPLOYMENT" else "OTHER"
+
+              APM_SERVICES = [
+                  f"{APP_NAME} - Accounts Service",
+                  f"{APP_NAME} - Auth Service",
+                  f"{APP_NAME} - Bill Pay Service",
+                  f"{APP_NAME} - Event Scheduler Service",
+                  f"{APP_NAME} - Notifications Service",
+                  f"{APP_NAME} - Support Service",
+                  f"{APP_NAME} - Transaction Service",
+              ]
+
+              print(f"[nr-change-tracking] scenario={SCENARIO} ({SCENARIO_NAME})")
+              print(f"[nr-change-tracking] type={CHANGE_TYPE} target={TARGET_ENTITIES} version={CHANGE_VERSION}")
+              print(f"[nr-change-tracking] description={CHANGE_DESCRIPTION!r}")
+
+              # Quick TCP probe — NerdGraph staging endpoint resolves to private NR IPs
+              # not reachable from external clusters. Detect early to avoid 15s × N hangs.
+              from urllib.parse import urlparse
+              _u = urlparse(NR_GQL)
+              _host, _port = _u.hostname, _u.port or 443
+              try:
+                  s = socket.create_connection((_host, _port), timeout=5)
+                  s.close()
+              except OSError as _e:
+                  print(f"[nr-change-tracking] NerdGraph unreachable ({_host}:{_port}: {_e}) — skipping")
+                  raise SystemExit(0)
+
+              def gql(query, variables=None):
+                  body = json.dumps({"query": query, "variables": variables or {}}).encode()
+                  req = urllib.request.Request(NR_GQL, data=body, method="POST",
+                      headers={"Content-Type": "application/json", "API-Key": NR_API_KEY})
+                  try:
+                      with urllib.request.urlopen(req, timeout=10) as r:
+                          return json.loads(r.read())
+                  except urllib.error.HTTPError as e:
+                      # Non-2xx from NerdGraph (e.g. 403/418 for wrong env/key) — skip gracefully
+                      print(f"[nr-change-tracking] NerdGraph returned HTTP {e.code} — skipping")
+                      raise SystemExit(0)
+
+              def search_entities(nrql_query, limit=25):
+                  q = ('{ actor { entitySearch(query: "%s") { results { entities { guid name } } } } }') % nrql_query
+                  try:
+                      r = gql(q)
+                      return r["data"]["actor"]["entitySearch"]["results"]["entities"] or []
+                  except SystemExit:
+                      raise
+                  except Exception as e:
+                      print(f"  lookup error: {e}")
+                      return []
+
+              def send_change_tracking(guid, name):
+                  m = """mutation($d: ChangeTrackingDeploymentInput!) {
+                    changeTrackingCreateDeployment(deployment: $d) { deploymentId entityGuid }
+                  }"""
+                  v = {"d": {
+                      "entityGuid": guid,
+                      "version": CHANGE_VERSION,
+                      "commit": CHANGE_VERSION,
+                      "user": "argocd",
+                      "deploymentType": DEPLOY_TYPE,
+                      "description": CHANGE_DESCRIPTION,
+                  }}
+                  try:
+                      r = gql(m, v)
+                      dep_id = r.get("data", {}).get("changeTrackingCreateDeployment", {}).get("deploymentId")
+                      if dep_id:
+                          return dep_id
+                      errs = [e.get("message") for e in r.get("errors", [])]
+                      return f"ERROR: {errs}"
+                  except Exception as e:
+                      return f"EXCEPTION: {e}"
+
+              sent = skipped = failed = 0
+              targets = []
+
+              # ── APM entities ────────────────────────────────────────────────────────────
+              if TARGET_ENTITIES in ("APM", "ALL"):
+                  for svc in APM_SERVICES:
+                      entities = search_entities(
+                          f"name = '{svc}' AND domain = 'APM' AND type = 'APPLICATION'"
+                      )
+                      if not entities:
+                          print(f"  ⏭  APM '{svc}' not found in NR — skipping")
+                          skipped += 1
+                          continue
+                      targets.append((svc, entities[0]["guid"]))
+
+              # ── Kubernetes cluster entity ────────────────────────────────────────────────
+              if TARGET_ENTITIES in ("K8S_CLUSTER", "ALL"):
+                  entities = search_entities(
+                      f"name = '{APP_NAME}' AND domain = 'INFRA' AND type = 'KUBERNETES_CLUSTER'"
+                  )
+                  if entities:
+                      targets.append((f"{APP_NAME} K8s Cluster", entities[0]["guid"]))
+                  else:
+                      print(f"  ⏭  K8s cluster '{APP_NAME}' not found in NR — skipping")
+                      skipped += 1
+
+              # ── Infra host (AKS node) entities ───────────────────────────────────────────
+              if TARGET_ENTITIES in ("INFRA_HOST", "ALL"):
+                  entities = search_entities(
+                      f"domain = 'INFRA' AND type = 'HOST' AND tags.clusterName = '{APP_NAME}'"
+                  )
+                  if entities:
+                      for e in entities:
+                          targets.append((e["name"], e["guid"]))
+                  else:
+                      print(f"  ⏭  No INFRA hosts found for cluster '{APP_NAME}' — skipping")
+                      skipped += 1
+
+              # ── Send to all resolved targets ────────────────────────────────────────────
+              for name, guid in targets:
+                  result = send_change_tracking(guid, name)
+                  if isinstance(result, str) and (result.startswith("ERROR") or result.startswith("EXCEPTION")):
+                      print(f"  ⚠️  '{name}': {result}")
+                      failed += 1
+                  else:
+                      print(f"  ✅ '{name}' deploymentId={result}")
+                      sent += 1
+
+              print(f"[nr-change-tracking] sent={sent} skipped={skipped} failed={failed}")
+              if failed:
+                  raise SystemExit(1)
+          env:
+            - name: NR_USER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: nr-secrets
+                  key: newrelic-user-api-key
+            - name: NR_ACCOUNT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: nr-secrets
+                  key: newrelic-account-id
+            - name: APP_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: infrastructure-config
+                  key: APP_NAME
+                  optional: true
+            - name: IMAGE_TAG
+              valueFrom:
+                configMapKeyRef:
+                  name: infrastructure-config
+                  key: IMAGE_TAG
+                  optional: true
+            # Scenario context — read from nr-scenario-context (patched by trigger scripts)
+            - name: CHANGE_TYPE
+              valueFrom:
+                configMapKeyRef:
+                  name: nr-scenario-context
+                  key: CHANGE_TYPE
+                  optional: true
+            - name: CHANGE_DESCRIPTION
+              valueFrom:
+                configMapKeyRef:
+                  name: nr-scenario-context
+                  key: CHANGE_DESCRIPTION
+                  optional: true
+            - name: TARGET_ENTITIES
+              valueFrom:
+                configMapKeyRef:
+                  name: nr-scenario-context
+                  key: TARGET_ENTITIES
+                  optional: true
+            - name: SCENARIO
+              valueFrom:
+                configMapKeyRef:
+                  name: nr-scenario-context
+                  key: SCENARIO
+                  optional: true
+            - name: SCENARIO_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: nr-scenario-context
+                  key: SCENARIO_NAME
+                  optional: true
+            - name: CHANGE_VERSION
+              valueFrom:
+                configMapKeyRef:
+                  name: nr-scenario-context
+                  key: CHANGE_VERSION
+                  optional: true
+            - name: NR_GQL_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: infrastructure-config
+                  key: NR_GQL_URL
+                  optional: true

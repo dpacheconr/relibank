@@ -52,4 +52,4 @@ COPY transaction_service /app
 EXPOSE 5000
 
 # Command to run the consumer script
-CMD ["newrelic-admin", "run-program", "uvicorn", "transaction_service:app", "--host", "0.0.0.0", "--port", "5000", "--workers", "4", "--log-config", "logging.conf"]
+CMD ["newrelic-admin", "run-program", "gunicorn", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "transaction_service:app", "--bind", "0.0.0.0:5000", "--log-config", "logging.conf"]

@@ -531,6 +531,134 @@ def test_all_chaos_scenarios_have_matching_pods():
     print(f"✓ {len(checked)} chaos/stress scenarios all matched >=1 pod: {checked}")
 
 
+def test_all_scenarios_triggerable():
+    """
+    Comprehensive audit: verify every scenario in /api/scenarios is actually triggerable.
+    - chaos/stress: dry_run check confirms matched_pods > 0 (uses dry_run support added by plan)
+    - script-backed: validate demo_flows/<dir>/trigger.sh exists and is executable
+    - toggle-based (payment/risk/ab-testing): validate config endpoint lists the scenario key
+    Collects all failures into a single report, so one run reveals every broken scenario.
+    """
+    print("\n=== Comprehensive Scenario Availability Audit ===")
+
+    # Get all scenarios
+    scenarios_resp = requests.get(f"{SCENARIO_SERVICE_URL}/scenario-runner/api/scenarios", timeout=10)
+    assert scenarios_resp.status_code == 200, f"Failed to list scenarios ({scenarios_resp.status_code})"
+    scenarios = scenarios_resp.json()
+    print(f"Auditing {len(scenarios)} total scenarios...")
+
+    failures = []
+    chaos_stress_count = 0
+    script_count = 0
+    toggle_count = 0
+
+    for s in scenarios:
+        scenario_name = s.get("name", "?")
+        scenario_type = s.get("type", "?")
+
+        try:
+            if scenario_type in ("chaos-mesh", "stress-chaos"):
+                chaos_stress_count += 1
+                # Skip scenarios without dry_run support
+                if scenario_name in _SCENARIOS_WITHOUT_DRY_RUN_SUPPORT:
+                    print(f"  ⊘ {scenario_name} ({scenario_type}): skipped (no dry_run support)")
+                    continue
+
+                # Dry-run and validate pod matching
+                endpoint = "trigger_chaos" if scenario_type == "chaos-mesh" else "trigger_stress"
+                resp = requests.post(
+                    f"{SCENARIO_SERVICE_URL}/scenario-runner/api/{endpoint}/{scenario_name}",
+                    params={"dry_run": "true"},
+                    timeout=10,
+                )
+                if resp.status_code != 200:
+                    failures.append(f"{scenario_name}: dry_run call failed ({resp.status_code})")
+                    continue
+
+                data = resp.json()
+                if data.get("dry_run") is not True:
+                    failures.append(f"{scenario_name}: dry_run param not honored (returned {data})")
+                    continue
+
+                matched = data.get("matched_pods", 0)
+                if matched <= 0:
+                    failures.append(f"{scenario_name}: matched 0 pods (selector may be wrong)")
+                    continue
+
+                print(f"  ✓ {scenario_name} ({scenario_type}): {matched} pod(s) matched")
+
+            elif scenario_type == "script-based":
+                script_count += 1
+                scenario_id = s.get("id")
+                scenario_dir = s.get("dir")
+
+                if not scenario_dir:
+                    failures.append(f"{scenario_id}: missing 'dir' field in registry")
+                    continue
+
+                # Validate trigger.sh exists and is executable (from repo root)
+                trigger_sh = os.path.join("demo_flows", scenario_dir, "trigger.sh")
+                if not os.path.exists(trigger_sh):
+                    failures.append(f"{scenario_id}: trigger.sh missing at {trigger_sh}")
+                    continue
+                if not os.access(trigger_sh, os.X_OK):
+                    failures.append(f"{scenario_id}: trigger.sh not executable at {trigger_sh}")
+                    continue
+
+                print(f"  ✓ {scenario_id} (script-based): trigger.sh found and executable")
+
+            elif scenario_type in ("payment", "risk-assessment", "ab-testing"):
+                toggle_count += 1
+                # Just validate that the config endpoint returns this scenario key
+                domain_map = {
+                    "payment": "payment-scenarios",
+                    "risk-assessment": "risk-assessment",
+                    "ab-testing": "ab-testing",
+                }
+                domain = domain_map.get(scenario_type)
+                if not domain:
+                    failures.append(f"{scenario_name}: unknown toggle domain '{scenario_type}'")
+                    continue
+
+                config_resp = requests.get(
+                    f"{SCENARIO_SERVICE_URL}/scenario-runner/api/{domain}/config",
+                    timeout=10,
+                )
+                if config_resp.status_code != 200:
+                    failures.append(f"{scenario_name}: config endpoint failed ({config_resp.status_code})")
+                    continue
+
+                config = config_resp.json()
+                config_scenarios = config.get("scenarios", {})
+                if scenario_name not in config_scenarios:
+                    failures.append(
+                        f"{scenario_name}: not found in {domain} config (keys: {list(config_scenarios.keys())})"
+                    )
+                    continue
+
+                print(f"  ✓ {scenario_name} ({scenario_type}): found in config")
+
+            else:
+                print(f"  ? {scenario_name}: unknown type '{scenario_type}'")
+
+        except Exception as e:
+            failures.append(f"{scenario_name}: exception during validation: {e}")
+
+    print(f"\n=== Audit Summary ===")
+    print(f"Chaos/stress: {chaos_stress_count}")
+    print(f"Script-based: {script_count}")
+    print(f"Toggle-based: {toggle_count}")
+    print(f"Total: {len(scenarios)}")
+
+    if failures:
+        print(f"\n❌ {len(failures)} failure(s) found:")
+        for failure in failures:
+            print(f"   - {failure}")
+        pytest.fail(f"{len(failures)} scenario(s) not triggerable")
+    else:
+        print("\n✓ All scenarios are triggerable!")
+
+
 if __name__ == "__main__":
     # Run tests manually for quick validation
     pytest.main([__file__, "-v", "-s"])

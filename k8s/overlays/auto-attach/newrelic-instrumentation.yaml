@@ -1,0 +1,20 @@
+apiVersion: newrelic.com/v1beta3
+kind: Instrumentation
+metadata:
+  name: newrelic-python
+  namespace: newrelic
+spec:
+  agent:
+    language: python
+    image: newrelic/newrelic-python-init:latest
+    env:
+      - name: NEW_RELIC_HOST
+        value: "collector.newrelic.com"
+  licenseKeySecret: newrelic-key-secret
+  # Only inject into pods that explicitly opt in via the nr-apm-instrumented label.
+  # This prevents the operator from injecting into every pod in the namespace,
+  # which would break the Shadow IT Discovery demo (risk-assessment-service must stay
+  # uninstrumented — visible via eBPF only).
+  podLabelSelector:
+    matchLabels:
+      nr-apm-instrumented: "true"

@@ -1,0 +1,44 @@
+# Uninstrumented image — no NR Python agent baked in.
+# The NR k8s-agents-operator injects the agent at pod startup when the pod
+# annotation instrumentation.newrelic.com/inject-python: "true" is present.
+# Used by the auto-attach overlay (k8s/overlays/auto-attach/).
+FROM python:3.12
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    zlib1g-dev \
+    unixodbc-dev \
+    libodbc2 \
+    curl \
+    gnupg
+
+# Add the Microsoft ODBC repository for Debian and install the driver
+RUN curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/microsoft.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/trusted.gpg.d/microsoft.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" > /etc/apt/sources.list.d/mssql-release.list \
+    && apt-get update \
+    && ACCEPT_EULA=Y apt-get install -y --no-install-recommends \
+    libodbc2 \
+    msodbcsql18
+
+# Stripe API keys (still needed at runtime for payment processing)
+ARG STRIPE_SECRET_KEY
+ENV STRIPE_SECRET_KEY=$STRIPE_SECRET_KEY
+
+ARG STRIPE_PUBLISHABLE_KEY
+ENV STRIPE_PUBLISHABLE_KEY=$STRIPE_PUBLISHABLE_KEY
+
+# Copy the requirements file and install dependencies
+COPY bill_pay/requirements.txt .
+RUN pip install -r requirements.txt
+
+# Copy the centralized utils directory
+COPY utils /app/utils
+
+# Copy the application code
+COPY bill_pay /app
+
+EXPOSE 5000
+
+CMD ["uvicorn", "bill_pay_service:app", "--host", "0.0.0.0", "--port", "5000", "--workers", "1", "--log-config", "logging.conf"]

@@ -1,0 +1,62 @@
+# Database Performance Matrix, Act 2: Lock Contention: Ledger Table Lock Injection
+# Acquires an exclusive UPDATE lock on all Ledger rows and holds it for 10 minutes.
+# Bill-pay transactions queue behind the lock; K8s 360 stays completely silent.
+# Only DB 360 sees the LCK_M_X wait storm and the connection pool backing up.
+#
+# Apply:  kubectl apply -f lock-injector.yaml
+# Remove: kubectl delete -f lock-injector.yaml  (or wait for the 10m TTL)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: database-performance-matrix-act2-lock-injector
+  namespace: relibank
+  labels:
+    app: relibank
+    experiment-type: lock-injection
+    scenario: database-performance-matrix-act2
+spec:
+  ttlSecondsAfterFinished: 30
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: relibank
+        experiment-type: lock-injection
+        scenario: database-performance-matrix-act2
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: lock-injector
+        image: ${MSSQL_CUSTOM_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command:
+          - /opt/mssql-tools18/bin/sqlcmd
+          - -S
+          - mssql-0
+          - -U
+          - $(MSSQL_SA_USER)
+          - -P
+          - $(MSSQL_SA_PASSWORD)
+          - -C
+          - -d
+          - RelibankDB
+          - -Q
+          - "BEGIN TRANSACTION; UPDATE Ledger SET CurrentBalance = CurrentBalance WHERE AccountID > 0; WAITFOR DELAY '00:10:00'; ROLLBACK;"
+        env:
+        - name: MSSQL_SA_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: MSSQL_SA_PASSWORD
+        - name: MSSQL_SA_USER
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: MSSQL_SA_USER
+        resources:
+          requests:
+            cpu: "10m"
+            memory: "32Mi"
+          limits:
+            cpu: "50m"
+            memory: "64Mi"

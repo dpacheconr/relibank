@@ -1,0 +1,24 @@
+# Uninstrumented image — no NR Python agent baked in.
+# The NR k8s-agents-operator injects the agent at pod startup when the pod
+# annotation instrumentation.newrelic.com/inject-python: "true" is present.
+# Used by the auto-attach overlay (k8s/overlays/auto-attach/).
+FROM python:3.12
+
+WORKDIR /app
+
+# Install build dependencies required for C extensions
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    zlib1g-dev \
+    unixodbc-dev
+
+# Copy the requirements file and install dependencies
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+# Copy the application code
+COPY . .
+
+EXPOSE 5000
+
+CMD ["python", "notifications_service.py"]

@@ -1,0 +1,26 @@
+# Uninstrumented image — no NR Python agent baked in.
+# The NR k8s-agents-operator injects the agent at pod startup when the pod
+# annotation instrumentation.newrelic.com/inject-python: "true" is present.
+# Used by the auto-attach overlay (k8s/overlays/auto-attach/).
+FROM python:3.12
+
+WORKDIR /app
+
+# Install build dependencies required for psycopg2-binary
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev \
+    gcc
+
+# Copy the requirements file and install dependencies
+COPY accounts_service/requirements.txt .
+RUN pip install -r requirements.txt
+
+# Copy the centralized utils directory
+COPY utils /app/utils
+
+# Copy the application code
+COPY accounts_service /app
+
+EXPOSE 5000
+
+CMD ["uvicorn", "accounts_service:app", "--host", "0.0.0.0", "--port", "5000", "--workers", "1", "--log-config", "logging.conf"]
